@@ -668,10 +668,19 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		log.Fatal("testfire requires a configured private key")
 	}
 
-	// Find the pair with the largest token reserves to test against.
-	var best cachedPair
-	var bestResTok *big.Int
-	for _, cp := range cached {
+	// Sort: prefer higher-fee pools (3000 > 500 > 100 → more liquid).
+	sorted := make([]cachedPair, len(cached))
+	copy(sorted, cached)
+	// Simple bubble — small N.
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].Fee > sorted[i].Fee {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	for i, cp := range sorted {
 		raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &cp.PairAddr, Data: selGetReserves}, nil)
 		if err != nil {
 			continue
@@ -687,44 +696,35 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		if resTok.Sign() == 0 {
 			continue
 		}
-		if bestResTok == nil || resTok.Cmp(bestResTok) > 0 {
-			bestResTok = resTok
-			best = cp
+
+		borrowAmt := new(big.Int).Div(resTok, big.NewInt(1000000)) // 0.0001%
+		if borrowAmt.Sign() == 0 {
+			borrowAmt = big.NewInt(10)
 		}
+
+		stableLabel := "USDT0"
+		if cp.StableToken == common.HexToAddress(cfg.WgUSDT) {
+			stableLabel = "WgUSDT"
+		}
+
+		fmt.Printf("\n=== TESTFIRE attempt %d/%d ===\n", i+1, len(sorted))
+		fmt.Printf("Pair:      %s\n", cp.PairAddr.Hex())
+		fmt.Printf("Token:     %s (decimals=%d)\n", cp.Token.Hex(), cp.TokenDecimals)
+		fmt.Printf("Stable:    %s (%s)\n", cp.StableToken.Hex(), stableLabel)
+		fmt.Printf("V3 Pool:   %s (fee=%d)\n", cp.PoolAddr.Hex(), cp.Fee)
+		fmt.Printf("Borrow:    %s tokens (0.0001%%)\n", price.FormatToken(borrowAmt, cp.TokenDecimals))
+		fmt.Printf("minProfit: 0 (forced)\n")
+
+		txHash, err := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 1, borrowAmt, big.NewInt(0))
+		if err != nil {
+			fmt.Printf("FAILED: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("SUCCESS — TX SENT: %s\n", txHash)
+		fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+		return
 	}
 
-	if bestResTok == nil {
-		log.Fatal("no liquid pair found for testfire")
-	}
-
-	// Borrow 0.001% of token reserves — tiny enough to minimise risk,
-	// but large enough to produce meaningful V3 output.
-	borrowAmt := new(big.Int).Div(bestResTok, big.NewInt(100000)) // 0.001%
-	if borrowAmt.Sign() == 0 {
-		borrowAmt = big.NewInt(100) // absolute floor
-	}
-
-	stableLabel := "USDT0"
-	if best.StableToken == common.HexToAddress(cfg.WgUSDT) {
-		stableLabel = "WgUSDT"
-	}
-
-	fmt.Println("=== TESTFIRE — forced single trade ===")
-	fmt.Printf("Pair:      %s\n", best.PairAddr.Hex())
-	fmt.Printf("Token:     %s (decimals=%d)\n", best.Token.Hex(), best.TokenDecimals)
-	fmt.Printf("Stable:    %s (%s)\n", best.StableToken.Hex(), stableLabel)
-	fmt.Printf("V3 Pool:   %s (fee=%d)\n", best.PoolAddr.Hex(), best.Fee)
-	fmt.Printf("Reserves:  %s tokens\n", price.FormatToken(bestResTok, best.TokenDecimals))
-	fmt.Printf("Borrow:    %s tokens (0.001%%)\n", price.FormatToken(borrowAmt, best.TokenDecimals))
-	fmt.Printf("minProfit: 0 (forced)\n")
-	fmt.Println("========================================")
-
-	txHash, err := t.FlashArb(ctx, best.PairAddr, best.Token, best.Fee, 1, borrowAmt, big.NewInt(0))
-	if err != nil {
-		log.Fatalf("TESTFIRE FAILED: %v", err)
-	}
-
-	fmt.Printf("\nTESTFIRE TX SENT: %s\n", txHash)
-	fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
-	fmt.Println("Done. Verify the tx on the explorer.")
+	log.Fatal("all pairs failed — none could execute")
 }
