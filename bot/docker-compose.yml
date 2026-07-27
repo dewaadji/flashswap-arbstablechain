@@ -1,8 +1,7 @@
 services:
   arb:
     build: .
-    # command: "-loop"           # dry run
-    # command: "-loop"           # live
+    command: "-loop"
     restart: unless-stopped
     env_file:
       - .env

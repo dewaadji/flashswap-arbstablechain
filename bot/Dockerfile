@@ -11,6 +11,5 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/stablearb .
-COPY --from=builder /app/contract.bin .
 
 ENTRYPOINT ["./stablearb"]
