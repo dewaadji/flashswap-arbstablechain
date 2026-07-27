@@ -1,0 +1,29 @@
+# Environment — contains private key, RPC URLs
+.env
+
+# Logs
+*.log
+
+# Build artifacts
+bot/stablearb
+bot/cmd/stablearb/stablearb
+bot/contract.bin
+
+# Forge output & deps
+arb/out/
+arb/cache/
+arb/broadcast/
+arb/lib/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude
+.claude/

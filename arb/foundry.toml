@@ -1,0 +1,12 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.23"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 1000
+
+[fmt]
+line_length = 120
+multiline_func_header = "all"
