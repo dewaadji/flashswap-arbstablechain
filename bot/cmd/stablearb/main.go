@@ -375,6 +375,19 @@ func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 
 func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats) {
 	usdt0Addr := common.HexToAddress(cfg.USDT0)
+
+	// Fetch gas price once per cycle for profitability calculation.
+	gasPrice, _ := client.SuggestGasPrice(ctx)
+	// Conservative estimate: 350k gas for a flash-swap tx.
+	// Gas cost = gasPrice * 350000, converted from 18-dec native to 6-dec USDT0.
+	gasCostUSD := big.NewInt(0)
+	if gasPrice != nil && gasPrice.Sign() > 0 {
+		gasCostUSD = new(big.Int).Div(
+			new(big.Int).Mul(gasPrice, big.NewInt(350000)),
+			price.Ten12,
+		)
+	}
+
 	for _, cp := range cached {
 		// 1. Get V2 reserves
 		raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &cp.PairAddr, Data: selGetReserves}, nil)
@@ -429,6 +442,7 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			repayUSD = repayNative
 		}
 		profit = new(big.Int).Sub(v3OutSlipped, repayUSD)
+			profit.Sub(profit, gasCostUSD)
 
 		if st != nil {
 			st.TotalChecks++
@@ -484,6 +498,7 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 				leftover := new(big.Int).Sub(tokenBought, repayToken)
 				leftoverUSD := price.EstimateV3Output(leftover, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
 				profit2 := price.AddSlippage(leftoverUSD, cfg.SlippageBPS)
+					profit2.Sub(profit2, gasCostUSD)
 
 				if st != nil {
 					st.TotalChecks++
