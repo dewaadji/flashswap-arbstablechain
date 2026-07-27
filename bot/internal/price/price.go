@@ -156,6 +156,31 @@ func AddSlippage(amount *big.Int, slippageBPS int64) *big.Int {
 	return num.Div(num, big.NewInt(10000))
 }
 
+// EstimateV3Buy estimates token output from selling USDT0 on V3.
+// usdt0In is in USDT0 6-decimal units; returns token amount in token native decimals.
+func EstimateV3Buy(usdt0In *big.Int, sqrtPriceX96 *big.Int, fee int64, tokenIsToken0 bool) *big.Int {
+	if usdt0In.Sign() == 0 {
+		return big.NewInt(0)
+	}
+
+	spotPrice := V3SpotPrice(sqrtPriceX96, tokenIsToken0)
+
+	usdt0Float := new(big.Float).SetInt(usdt0In)
+
+	// token = usdt0 / spotPrice (raw ratio handles decimal conversion)
+	tokenFloat := new(big.Float).Quo(usdt0Float, spotPrice)
+
+	// Apply fee
+	feeRatio := new(big.Float).Quo(
+		new(big.Float).SetInt64(1000000-fee),
+		new(big.Float).SetInt64(1000000),
+	)
+	tokenFloat.Mul(tokenFloat, feeRatio)
+
+	output, _ := tokenFloat.Int(nil)
+	return output
+}
+
 // WgUSDTToUSDT0 converts a WgUSDT amount (18 decimals) to USDT0 (6 decimals).
 func WgUSDTToUSDT0(wgusdtAmt *big.Int) *big.Int {
 	return new(big.Int).Div(wgusdtAmt, Ten12)

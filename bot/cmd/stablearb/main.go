@@ -37,7 +37,7 @@ type cachedPair struct {
 	PoolAddr        common.Address // V3 pool
 	PoolTokenIsTok0 bool           // true = token is V3 pool's token0
 	Fee             int64
-	}
+}
 
 type Stats struct {
 	Cycles       int
@@ -48,7 +48,7 @@ type Stats struct {
 	BestBorrow   *big.Int
 	StartTime    time.Time
 	TotalRPCErrs int
-	}
+}
 
 func (s *Stats) Print(w io.Writer) {
 	elapsed := time.Since(s.StartTime).Round(time.Second)
@@ -65,13 +65,14 @@ func (s *Stats) Print(w io.Writer) {
 		fmt.Fprintf(w, "Best profit:    none found\n")
 	}
 	fmt.Fprintf(w, "======================\n")
-	}
+}
 
 func main() {
 	deployFlag := flag.Bool("deploy", false, "Deploy the arb contract")
 	discoverFlag := flag.Bool("discover", false, "Discover V2 pairs and V3 pools")
 	onceFlag := flag.Bool("once", false, "Run one arb check cycle")
 	loopFlag := flag.Bool("loop", false, "Run arb loop continuously")
+	testFireFlag := flag.Bool("testfire", false, "Force one tiny trade to verify tx pipeline")
 	durationMin := flag.Int("duration", 0, "Stop after N minutes (0 = run forever)")
 	flag.Parse()
 
@@ -105,7 +106,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("private key: %v", err)
 		}
-		t, err = trader.New(client, big.NewInt(cfg.ChainID), pk, common.HexToAddress(cfg.ArbContract), cfg.DryRun)
+		t, err = trader.New(client, big.NewInt(cfg.ChainID), pk, common.HexToAddress(cfg.ArbContract), cfg.DryRun, cfg.MaxGasPrice)
 		if err != nil {
 			log.Fatalf("trader: %v", err)
 		}
@@ -128,8 +129,13 @@ func main() {
 		return
 	}
 
-	flag.Usage()
+	if *testFireFlag {
+		runTestFire(ctx, client, cfg, t, cached)
+		return
 	}
+
+	flag.Usage()
+}
 
 func discoverCache(ctx context.Context, client *ethclient.Client, cfg *config.Config) []cachedPair {
 	usdt0 := common.HexToAddress(cfg.USDT0)
@@ -239,7 +245,7 @@ func discoverCache(ctx context.Context, client *ethclient.Client, cfg *config.Co
 		}
 	}
 	return cached
-	}
+}
 
 func runDeploy(ctx context.Context, client *ethclient.Client, cfg *config.Config) {
 	pk, err := contract.HexToPrivateKey(cfg.PrivateKey)
@@ -272,7 +278,7 @@ func runDeploy(ctx context.Context, client *ethclient.Client, cfg *config.Config
 
 	fmt.Printf("\nDEPLOYED at: %s\n", addr.Hex())
 	fmt.Println("Set V3_ARB_CONTRACT=" + addr.Hex() + " in .env")
-	}
+}
 
 func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Config) {
 	usdt0 := common.HexToAddress(cfg.USDT0)
@@ -358,9 +364,10 @@ func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 	for _, p := range pools {
 		fmt.Printf("  %s  token=%s  fee=%d\n", p.Address.Hex(), p.Token.Hex(), p.Fee)
 	}
-	}
+}
 
 func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats) {
+	usdt0Addr := common.HexToAddress(cfg.USDT0)
 	for _, cp := range cached {
 		// 1. Get V2 reserves
 		raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &cp.PairAddr, Data: selGetReserves}, nil)
@@ -454,12 +461,68 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 				}
 			}
 		}
+
+		// Dir 2: borrow stable, buy token on V3, repay token, sell leftover.
+		// Skip WgUSDT pairs — contract has a known bug with Dir 2 on WgUSDT.
+		if cp.StableToken == usdt0Addr {
+			borrowStable := new(big.Int).Div(resUSD, big.NewInt(100))
+			if borrowStable.Sign() == 0 {
+				borrowStable = big.NewInt(1e6)
+			}
+
+			tokenBought := price.EstimateV3Buy(borrowStable, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+			repayToken := price.V2AmountIn(borrowStable, resTok, resUSD)
+
+			if tokenBought.Cmp(repayToken) > 0 {
+				leftover := new(big.Int).Sub(tokenBought, repayToken)
+				leftoverUSD := price.EstimateV3Output(leftover, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+				profit2 := price.AddSlippage(leftoverUSD, cfg.SlippageBPS)
+
+				if st != nil {
+					st.TotalChecks++
+					if profit2.Cmp(cfg.MinProfit) >= 0 {
+						st.Profitable++
+					}
+					if profit2.Cmp(st.BestProfit) > 0 {
+						st.BestProfit = new(big.Int).Set(profit2)
+						st.BestPair = short(cp.Token.Hex())
+						st.BestBorrow = new(big.Int).Set(borrowStable)
+					}
+				}
+
+				if profit2.Cmp(threshold) >= 0 {
+					marker2 := "  "
+					if profit2.Cmp(cfg.MinProfit) >= 0 {
+						marker2 = "**"
+					}
+					fmt.Printf("%s %-12s borrow=%-10s buy=%-10s repay=%-10s leftover=%-10s profit=%-10s [resUSD=%s] D2\n",
+						marker2,
+						short(cp.Token.Hex()),
+						price.FormatUSD(borrowStable),
+						price.FormatToken(tokenBought, cp.TokenDecimals),
+						price.FormatToken(repayToken, cp.TokenDecimals),
+						price.FormatUSD(leftoverUSD),
+						price.FormatUSD(profit2),
+						price.FormatUSD(resUSD),
+					)
+
+					if profit2.Cmp(cfg.MinProfit) >= 0 && !cfg.DryRun && t != nil {
+						txHash, txErr := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 2, borrowStable, cfg.MinProfit)
+						if txErr != nil {
+							fmt.Printf("  tx error (D2): %v\n", txErr)
+						} else {
+							fmt.Printf("  tx (D2): %s\n", txHash)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if st == nil {
 		fmt.Printf("  Done checking %d pairs.\n", len(cached))
 	}
-	}
+}
 
 func runLoop(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, durationMin int) {
 	logFile, err := os.Create("arbitrage.log")
@@ -528,14 +591,14 @@ func runLoop(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 	}
 
 	st.Print(multiW)
-	}
+}
 
 func short(s string) string {
 	if len(s) > 12 {
 		return s[:12] + "..."
 	}
 	return s
-	}
+}
 
 // arbToken returns the non-stable token from a V2 pair.
 func arbToken(t0, t1, stable common.Address) common.Address {
@@ -551,4 +614,73 @@ func arbTokenIs0(t0, t1, stable common.Address) (common.Address, bool) {
 		return t1, false
 	}
 	return t0, true
+}
+
+func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair) {
+	if cfg.DryRun {
+		log.Fatal("testfire requires V3_DRY_RUN=false")
+	}
+	if t == nil {
+		log.Fatal("testfire requires a configured private key")
+	}
+
+	// Find the pair with the largest token reserves to test against.
+	var best cachedPair
+	var bestResTok *big.Int
+	for _, cp := range cached {
+		raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &cp.PairAddr, Data: selGetReserves}, nil)
+		if err != nil {
+			continue
+		}
+		r0 := new(big.Int).SetBytes(raw[0:32])
+		r1 := new(big.Int).SetBytes(raw[32:64])
+		var resTok *big.Int
+		if cp.IsToken0 {
+			resTok = r0
+		} else {
+			resTok = r1
+		}
+		if resTok.Sign() == 0 {
+			continue
+		}
+		if bestResTok == nil || resTok.Cmp(bestResTok) > 0 {
+			bestResTok = resTok
+			best = cp
+		}
+	}
+
+	if bestResTok == nil {
+		log.Fatal("no liquid pair found for testfire")
+	}
+
+	// Borrow 0.001% of token reserves — tiny enough to minimise risk,
+	// but large enough to produce meaningful V3 output.
+	borrowAmt := new(big.Int).Div(bestResTok, big.NewInt(100000)) // 0.001%
+	if borrowAmt.Sign() == 0 {
+		borrowAmt = big.NewInt(100) // absolute floor
+	}
+
+	stableLabel := "USDT0"
+	if best.StableToken == common.HexToAddress(cfg.WgUSDT) {
+		stableLabel = "WgUSDT"
+	}
+
+	fmt.Println("=== TESTFIRE — forced single trade ===")
+	fmt.Printf("Pair:      %s\n", best.PairAddr.Hex())
+	fmt.Printf("Token:     %s (decimals=%d)\n", best.Token.Hex(), best.TokenDecimals)
+	fmt.Printf("Stable:    %s (%s)\n", best.StableToken.Hex(), stableLabel)
+	fmt.Printf("V3 Pool:   %s (fee=%d)\n", best.PoolAddr.Hex(), best.Fee)
+	fmt.Printf("Reserves:  %s tokens\n", price.FormatToken(bestResTok, best.TokenDecimals))
+	fmt.Printf("Borrow:    %s tokens (0.001%%)\n", price.FormatToken(borrowAmt, best.TokenDecimals))
+	fmt.Printf("minProfit: 0 (forced)\n")
+	fmt.Println("========================================")
+
+	txHash, err := t.FlashArb(ctx, best.PairAddr, best.Token, best.Fee, 1, borrowAmt, big.NewInt(0))
+	if err != nil {
+		log.Fatalf("TESTFIRE FAILED: %v", err)
+	}
+
+	fmt.Printf("\nTESTFIRE TX SENT: %s\n", txHash)
+	fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+	fmt.Println("Done. Verify the tx on the explorer.")
 }

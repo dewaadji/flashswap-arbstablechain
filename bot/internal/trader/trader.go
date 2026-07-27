@@ -18,28 +18,30 @@ import (
 )
 
 type Trader struct {
-	client  *ethclient.Client
-	chainID *big.Int
-	pk      *ecdsa.PrivateKey
-	from    common.Address
-	arbAddr common.Address
-	dryRun  bool
-	arbABI  *abi.ABI
+	client      *ethclient.Client
+	chainID     *big.Int
+	pk          *ecdsa.PrivateKey
+	from        common.Address
+	arbAddr     common.Address
+	dryRun      bool
+	maxGasPrice *big.Int
+	arbABI      *abi.ABI
 }
 
-func New(client *ethclient.Client, chainID *big.Int, pk *ecdsa.PrivateKey, arbAddr common.Address, dryRun bool) (*Trader, error) {
+func New(client *ethclient.Client, chainID *big.Int, pk *ecdsa.PrivateKey, arbAddr common.Address, dryRun bool, maxGasPrice *big.Int) (*Trader, error) {
 	arbABI, err := abi.JSON(strings.NewReader(contract.StableArbV2V3ABI))
 	if err != nil {
 		return nil, err
 	}
 	return &Trader{
-		client:  client,
-		chainID: chainID,
-		pk:      pk,
-		from:    crypto.PubkeyToAddress(pk.PublicKey),
-		arbAddr: arbAddr,
-		dryRun:  dryRun,
-		arbABI:  &arbABI,
+		client:      client,
+		chainID:     chainID,
+		pk:          pk,
+		from:        crypto.PubkeyToAddress(pk.PublicKey),
+		arbAddr:     arbAddr,
+		dryRun:      dryRun,
+		maxGasPrice: maxGasPrice,
+		arbABI:      &arbABI,
 	}, nil
 }
 
@@ -50,7 +52,7 @@ func (t *Trader) FlashArb(
 	dir uint8,
 	borrowAmt, minProfit *big.Int,
 ) (string, error) {
-	input, err := t.arbABI.Pack("flashArb", pair, token, big.NewInt(v3Fee), big.NewInt(int64(dir)), borrowAmt, minProfit)
+	input, err := t.arbABI.Pack("flashArb", pair, token, uint32(v3Fee), dir, borrowAmt, minProfit)
 	if err != nil {
 		return "", fmt.Errorf("pack: %w", err)
 	}
@@ -67,7 +69,7 @@ func (t *Trader) ExecuteArb(
 	deadline *big.Int,
 	value *big.Int,
 ) (string, error) {
-	input, err := t.arbABI.Pack("executeArb", token, big.NewInt(v3Fee), big.NewInt(int64(dir)), minProfit, deadline)
+	input, err := t.arbABI.Pack("executeArb", token, uint32(v3Fee), dir, minProfit, deadline)
 	if err != nil {
 		return "", fmt.Errorf("pack: %w", err)
 	}
@@ -93,6 +95,10 @@ func (t *Trader) sendTx(ctx context.Context, data []byte, value *big.Int) (strin
 	gasPrice, err := t.client.SuggestGasPrice(ctx)
 	if err != nil {
 		return "", fmt.Errorf("gasprice: %w", err)
+	}
+
+	if t.maxGasPrice != nil && t.maxGasPrice.Sign() > 0 && gasPrice.Cmp(t.maxGasPrice) > 0 {
+		return "", fmt.Errorf("gas price %s exceeds max %s", gasPrice.String(), t.maxGasPrice.String())
 	}
 
 	msg := ethereum.CallMsg{

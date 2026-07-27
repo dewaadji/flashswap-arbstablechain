@@ -35,7 +35,7 @@ func Dir2(
 		return nil, err
 	}
 
-	input, err := arbABI.Pack("flashArb", pair, token, big.NewInt(v3Fee), big.NewInt(2), borrowAmt, minProfit)
+	input, err := arbABI.Pack("flashArb", pair, token, uint32(v3Fee), uint8(2), borrowAmt, minProfit)
 	if err != nil {
 		return nil, err
 	}
