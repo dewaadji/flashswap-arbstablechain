@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -137,5 +139,18 @@ func (t *Trader) sendTx(ctx context.Context, data []byte, value *big.Int) (strin
 
 	txHash := signedTx.Hash().Hex()
 	fmt.Printf("[TX SENT] %s (gas=%d, price=%s)\n", txHash, gasLimit, gasPrice.String())
+
+	// Wait for receipt with 120s timeout.
+	waitCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	receipt, err := bind.WaitMined(waitCtx, t.client, signedTx)
+	if err != nil {
+		return txHash, fmt.Errorf("wait mined: %w", err)
+	}
+	if receipt.Status == 0 {
+		return txHash, fmt.Errorf("tx reverted on-chain (gas used=%d)", receipt.GasUsed)
+	}
+
+	fmt.Printf("[TX CONFIRMED] %s (block=%d, gas=%d)\n", txHash, receipt.BlockNumber, receipt.GasUsed)
 	return txHash, nil
 }
