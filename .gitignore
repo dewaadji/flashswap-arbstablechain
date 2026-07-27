@@ -7,7 +7,6 @@
 # Build artifacts
 bot/stablearb
 bot/cmd/stablearb/stablearb
-bot/contract.bin
 
 # Forge output & deps
 arb/out/
