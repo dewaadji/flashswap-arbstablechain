@@ -52,7 +52,7 @@ func (t *Trader) FlashArb(
 	dir uint8,
 	borrowAmt, minProfit *big.Int,
 ) (string, error) {
-	input, err := t.arbABI.Pack("flashArb", pair, token, uint32(v3Fee), dir, borrowAmt, minProfit)
+	input, err := t.arbABI.Pack("flashArb", pair, token, big.NewInt(v3Fee), dir, borrowAmt, minProfit)
 	if err != nil {
 		return "", fmt.Errorf("pack: %w", err)
 	}
@@ -69,7 +69,7 @@ func (t *Trader) ExecuteArb(
 	deadline *big.Int,
 	value *big.Int,
 ) (string, error) {
-	input, err := t.arbABI.Pack("executeArb", token, uint32(v3Fee), dir, minProfit, deadline)
+	input, err := t.arbABI.Pack("executeArb", token, big.NewInt(v3Fee), dir, minProfit, deadline)
 	if err != nil {
 		return "", fmt.Errorf("pack: %w", err)
 	}

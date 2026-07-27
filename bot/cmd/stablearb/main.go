@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -114,8 +115,14 @@ func main() {
 		log.Fatal("V3_PRIVATE_KEY required when V3_DRY_RUN=false")
 	}
 
-	fmt.Println("Discovering pairs & pools (one-time)...")
-	cached := discoverCache(ctx, client, cfg)
+	fmt.Println("Discovering pairs & pools...")
+	cached := loadPairCache("paircache.json")
+	if cached != nil {
+		fmt.Printf("Loaded %d pairs from cache\n", len(cached))
+	} else {
+		cached = discoverCache(ctx, client, cfg)
+		savePairCache("paircache.json", cached)
+	}
 	fmt.Printf("Cached %d liquid pairs ready for monitoring\n", len(cached))
 	time.Sleep(1 * time.Second)
 
@@ -614,6 +621,28 @@ func arbTokenIs0(t0, t1, stable common.Address) (common.Address, bool) {
 		return t1, false
 	}
 	return t0, true
+}
+
+func savePairCache(path string, pairs []cachedPair) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	json.NewEncoder(f).Encode(pairs)
+}
+
+func loadPairCache(path string) []cachedPair {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var pairs []cachedPair
+	if err := json.NewDecoder(f).Decode(&pairs); err != nil {
+		return nil
+	}
+	return pairs
 }
 
 func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair) {
