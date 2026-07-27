@@ -19,16 +19,17 @@ func Deploy(
 	chainID *big.Int,
 	pk *ecdsa.PrivateKey,
 	creationBytecode []byte,
-	v2Router, v3Router, usdt0 common.Address,
+	v2Router, v3Router, usdt0, wgusdt common.Address,
 ) (common.Address, error) {
 	from := crypto.PubkeyToAddress(pk.PublicKey)
 
-	// ABI-encode constructor args: (address, address, address)
+	// ABI-encode constructor args: (address, address, address, address)
 	// Each address is 32 bytes (left-padded)
-	args := make([]byte, 96)
+	args := make([]byte, 128)
 	copy(args[12:32], v2Router.Bytes())
 	copy(args[44:64], v3Router.Bytes())
 	copy(args[76:96], usdt0.Bytes())
+	copy(args[108:128], wgusdt.Bytes())
 
 	data := make([]byte, 0, len(creationBytecode)+len(args))
 	data = append(data, creationBytecode...)

@@ -15,10 +15,12 @@ type Config struct {
 	RPCWS       string
 	V2Router    string
 	V2Factory   string
+	V2Factory2  string // optional — second V2 factory (e.g. DYORswap)
 	V3Router    string
 	V3Factory   string
 	V3Quoter    string
 	USDT0       string
+	WgUSDT      string
 	ArbContract string
 	PrivateKey  string
 	MinProfit   *big.Int
@@ -51,6 +53,7 @@ func Load(path string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("V3_V2_FACTORY required")
 	}
+	cfg.V2Factory2 = os.Getenv("V3_V2_FACTORY_DYOR")
 	cfg.V3Router, ok = env("V3_V3_ROUTER")
 	if !ok {
 		return nil, fmt.Errorf("V3_V3_ROUTER required")
@@ -67,6 +70,7 @@ func Load(path string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("V3_USDT0 required")
 	}
+	cfg.WgUSDT = os.Getenv("V3_WGUSDT")
 	cfg.ArbContract = os.Getenv("V3_ARB_CONTRACT")
 
 	cfg.PrivateKey = os.Getenv("V3_PRIVATE_KEY")

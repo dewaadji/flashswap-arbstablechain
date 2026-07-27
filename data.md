@@ -24,6 +24,7 @@
 | Token | Address | Decimals |
 |---|---|---|
 | USDT0 (native + ERC-20) | `0x779Ded0c9e1022225f8E0630b35a9b54bE713736` | 6 |
+| WgUSDT (wrapped USDT0) | `0x817997ca8394e26cce3de3a076a4889b27dbf9de` | 18 |
 
 ## Bot Wallet
 
@@ -31,20 +32,28 @@
 |---|---|
 | Address | `0x4a54727c2ebE283999C6FbD2DD0b4aE3a81021F5` |
 
-## Deployed StableArbV2V3
+## Deployed StableArbV2V3 (v2 — with WgUSDT support)
 
 | Item | Value |
 |---|---|
-| Address | `0x5780159F14b70552b4468BAE01635A4C179A3520` |
+| Address | `0x86D3cd97fE8229e6102fee895c5571D450AE8939` |
 | Owner | `0x4a54727c2ebE283999C6FbD2DD0b4aE3a81021F5` |
 | V2 Router | `0xa571dc7c4f2369F1cA24D3a7E8a35c07Ff52bfC0` |
 | V3 Router | `0x32eaf9B5d5F2CD7361c5012890C943D7de84C22a` |
 | USDT0 | `0x779Ded0c9e1022225f8E0630b35a9b54bE713736` |
+| WgUSDT | `0x817997ca8394e26cce3de3a076a4889b27dbf9de` |
 
-## Constructor Args
+## Previous Deploy (v1)
+
+| Item | Value |
+|---|---|
+| Address | `0x5780159F14b70552b4468BAE01635A4C179A3520` |
+
+## Constructor Args (v2)
 
 ```
 v2Router: 0xa571dc7c4f2369F1cA24D3a7E8a35c07Ff52bfC0
 v3Router: 0x32eaf9B5d5F2CD7361c5012890C943D7de84C22a
 usdt0:    0x779Ded0c9e1022225f8E0630b35a9b54bE713736
+wgusdt:   0x817997ca8394e26cce3de3a076a4889b27dbf9de
 ```

@@ -12,7 +12,7 @@ contract StableArbV2V3Test is Test {
     address constant USDT0     = address(0x300);
 
     function setUp() public {
-        arb = new StableArbV2V3(V2_ROUTER, V3_ROUTER, USDT0);
+        arb = new StableArbV2V3(V2_ROUTER, V3_ROUTER, USDT0, address(0));
     }
 
     function test_constructor_owner() public view {

@@ -1,0 +1,13 @@
+services:
+  arb:
+    build: .
+    # command: "-loop"           # dry run
+    # command: "-loop"           # live
+    restart: unless-stopped
+    env_file:
+      - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

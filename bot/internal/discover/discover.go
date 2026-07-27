@@ -17,9 +17,10 @@ import (
 var feeTiers = []int64{100, 500, 3000, 10000}
 
 type PairInfo struct {
-	Address common.Address
-	Token0  common.Address
-	Token1  common.Address
+	Address     common.Address
+	Token0      common.Address
+	Token1      common.Address
+	StableToken common.Address // USDT0 or WgUSDT — which token is the stable side
 }
 
 type PoolInfo struct {
@@ -46,7 +47,7 @@ func TokenDecimals(ctx context.Context, client *ethclient.Client, token common.A
 	return new(big.Int).SetBytes(raw).Int64()
 }
 
-func V2Pairs(ctx context.Context, client *ethclient.Client, factoryAddr, usdt0 common.Address) ([]PairInfo, error) {
+func V2Pairs(ctx context.Context, client *ethclient.Client, factoryAddr, usdt0, wgusdt common.Address) ([]PairInfo, error) {
 	factoryABI, err := abi.JSON(strings.NewReader(contract.V2FactoryABI))
 	if err != nil {
 		return nil, err
@@ -78,11 +79,66 @@ func V2Pairs(ctx context.Context, client *ethclient.Client, factoryAddr, usdt0 c
 		t0 := common.BytesToAddress(t0Raw)
 		t1 := common.BytesToAddress(t1Raw)
 
+		var stableTok common.Address
 		if t0 == usdt0 || t1 == usdt0 {
-			pairs = append(pairs, PairInfo{Address: pairAddr, Token0: t0, Token1: t1})
+			stableTok = usdt0
+		} else if wgusdt != (common.Address{}) && (t0 == wgusdt || t1 == wgusdt) {
+			stableTok = wgusdt
+		}
+		if stableTok != (common.Address{}) {
+			pairs = append(pairs, PairInfo{Address: pairAddr, Token0: t0, Token1: t1, StableToken: stableTok})
 		}
 	}
 
+	return pairs, nil
+}
+
+// V2PairsForTokens looks up V2 pairs for specific tokens via getPair (fast — O(tokens)).
+// Tries both USDT0 and WgUSDT as the paired token on the given factory.
+func V2PairsForTokens(ctx context.Context, client *ethclient.Client, factoryAddr, usdt0, wgusdt common.Address, tokens []common.Address) ([]PairInfo, error) {
+	factoryABI, err := abi.JSON(strings.NewReader(contract.V2FactoryABI))
+	if err != nil {
+		return nil, err
+	}
+
+	pairs := make([]PairInfo, 0)
+	seen := make(map[common.Address]bool)
+
+	for _, tok := range tokens {
+		for _, stable := range []common.Address{usdt0, wgusdt} {
+			if stable == (common.Address{}) {
+				continue
+			}
+			input, err := factoryABI.Pack("getPair", tok, stable)
+			if err != nil {
+				continue
+			}
+			raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &factoryAddr, Data: input}, nil)
+			if err != nil || len(raw) < 32 {
+				continue
+			}
+			pairAddr := common.BytesToAddress(raw)
+			if pairAddr == (common.Address{}) || seen[pairAddr] {
+				continue
+			}
+			seen[pairAddr] = true
+
+			t0Raw, _ := client.CallContract(ctx, ethereum.CallMsg{To: &pairAddr, Data: selToken0}, nil)
+			t1Raw, _ := client.CallContract(ctx, ethereum.CallMsg{To: &pairAddr, Data: selToken1}, nil)
+			if len(t0Raw) < 32 || len(t1Raw) < 32 {
+				continue
+			}
+			t0 := common.BytesToAddress(t0Raw)
+			t1 := common.BytesToAddress(t1Raw)
+
+			pairs = append(pairs, PairInfo{
+				Address:     pairAddr,
+				Token0:      t0,
+				Token1:      t1,
+				StableToken: stable,
+			})
+		}
+	}
 	return pairs, nil
 }
 

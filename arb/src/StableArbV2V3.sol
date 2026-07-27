@@ -8,6 +8,11 @@ interface IUniswapV2Callee {
     function uniswapV2Call(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }
 
+/// @notice WgUSDT — wrapped USDT0 (18 decimals, 1:1).
+interface IWgUSDT {
+    function deposit(uint256 amount) external;
+}
+
 interface IUniswapV2Pair {
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
     function token0() external view returns (address);
@@ -54,9 +59,13 @@ interface IERC20 {
 ///
 /// Stable Chain uses USDT0 as both the native gas token and the canonical
 /// ERC-20.  Balances are shared — a native transfer updates the ERC-20
-/// balance and vice versa — so no wrapping/unwrapping is ever needed.
+/// balance and vice versa.
 ///
-/// Two entrypoints (both ``onlyOwner``):
+/// Some V2 pairs use WgUSDT (wrapped USDT0, 18 decimals) instead of USDT0
+/// directly.  This contract auto-detects WgUSDT pairs and wraps/unwraps
+/// as needed during repayment.
+///
+/// Entrypoints (both ``onlyOwner``):
 ///   - ``flashArb``  – borrow from a V2 pair via flash-swap, execute the arb,
 ///                     repay the pair, sweep native USDT0 profit to owner.
 ///   - ``executeArb`` – same two-leg arb but funded with ``msg.value``
@@ -65,13 +74,15 @@ contract StableArbV2V3 is IUniswapV2Callee {
     address public immutable owner;
     address public immutable v2Router;
     address public immutable v3Router;
-    address public immutable usdt0; // canonical ERC-20 USDT0 (= native)
+    address public immutable usdt0;  // canonical ERC-20 USDT0 (= native)
+    address public immutable wgusdt; // wrapped USDT0 (18d) — zero-address if unused
 
-    constructor(address _v2Router, address _v3Router, address _usdt0) {
+    constructor(address _v2Router, address _v3Router, address _usdt0, address _wgusdt) {
         owner = msg.sender;
         v2Router = _v2Router;
         v3Router = _v3Router;
         usdt0 = _usdt0;
+        wgusdt = _wgusdt;
     }
 
     modifier onlyOwner() {
@@ -177,14 +188,27 @@ contract StableArbV2V3 is IUniswapV2Callee {
         uint256 balBefore,
         uint256 minProfit
     ) internal {
-        uint256 borrowAmt = token == IUniswapV2Pair(pair).token0() ? amount0 : amount1;
+        bool tokenIs0 = token == IUniswapV2Pair(pair).token0();
+        uint256 borrowAmt = tokenIs0 ? amount0 : amount1;
 
         uint256 usdt0FromV3 = _sellTokenOnV3(token, v3Fee, borrowAmt);
 
-        uint256 repayAmt = _v2RepayAmountOther(pair, borrowAmt, token == IUniswapV2Pair(pair).token0());
-        require(usdt0FromV3 >= repayAmt, "V3 output < repay");
+        uint256 repayAmt = _v2RepayAmountOther(pair, borrowAmt, tokenIs0);
+        address otherToken = tokenIs0
+            ? IUniswapV2Pair(pair).token1()
+            : IUniswapV2Pair(pair).token0();
 
-        require(IERC20(usdt0).transfer(pair, repayAmt), "USDT0 transfer");
+        if (otherToken == wgusdt && wgusdt != address(0)) {
+            // WgUSDT path: wrap USDT0 -> WgUSDT before repaying
+            uint256 repayUSDT0 = (repayAmt + 1e12 - 1) / 1e12; // ceil div 18d->6d
+            require(usdt0FromV3 >= repayUSDT0, "V3 output < repay");
+            IERC20(usdt0).approve(wgusdt, repayUSDT0);
+            IWgUSDT(wgusdt).deposit(repayUSDT0);
+            require(IERC20(wgusdt).transfer(pair, repayAmt), "WgUSDT transfer");
+        } else {
+            require(usdt0FromV3 >= repayAmt, "V3 output < repay");
+            require(IERC20(usdt0).transfer(pair, repayAmt), "USDT0 transfer");
+        }
 
         // Native balance reflects the shared USDT0 balance — no unwrap.
         require(address(this).balance >= balBefore + minProfit, "profit < min");

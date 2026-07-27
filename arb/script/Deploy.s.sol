@@ -19,9 +19,10 @@ contract Deploy is Script {
         address v2Router = vm.envAddress("V2_ROUTER");
         address v3Router = vm.envAddress("V3_ROUTER");
         address usdt0    = vm.envAddress("USDT0");
+        address wgusdt   = vm.envOr("WGUSDT", address(0));
 
         vm.startBroadcast();
-        StableArbV2V3 arb = new StableArbV2V3(v2Router, v3Router, usdt0);
+        StableArbV2V3 arb = new StableArbV2V3(v2Router, v3Router, usdt0, wgusdt);
         vm.stopBroadcast();
 
         console.log("StableArbV2V3 deployed at: %s", address(arb));
@@ -29,5 +30,6 @@ contract Deploy is Script {
         console.log("  v2Router:%s", arb.v2Router());
         console.log("  v3Router:%s", arb.v3Router());
         console.log("  usdt0:   %s", arb.usdt0());
+        console.log("  wgusdt:  %s", arb.wgusdt());
     }
 }

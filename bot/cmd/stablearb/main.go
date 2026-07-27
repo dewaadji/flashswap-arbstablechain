@@ -30,7 +30,8 @@ var (
 
 type cachedPair struct {
 	PairAddr        common.Address // V2 pair
-	Token           common.Address // arb token (non-USDT0)
+	Token           common.Address // arb token (non-stable)
+	StableToken     common.Address // USDT0 or WgUSDT
 	TokenDecimals   int64          // token decimals
 	IsToken0        bool           // true = token is V2 pair's token0
 	PoolAddr        common.Address // V3 pool
@@ -132,17 +133,61 @@ func main() {
 
 func discoverCache(ctx context.Context, client *ethclient.Client, cfg *config.Config) []cachedPair {
 	usdt0 := common.HexToAddress(cfg.USDT0)
+	wgusdt := common.HexToAddress(cfg.WgUSDT)
 	v2Factory := common.HexToAddress(cfg.V2Factory)
+	v2Factory2 := common.HexToAddress(cfg.V2Factory2)
 	v3Factory := common.HexToAddress(cfg.V3Factory)
 
-	pairs, err := discover.V2Pairs(ctx, client, v2Factory, usdt0)
-	if err != nil {
-		log.Fatalf("v2 pairs: %v", err)
+	factories := []struct {
+		addr  common.Address
+		label string
+	}{{v2Factory, "canonical"}}
+	if v2Factory2 != (common.Address{}) {
+		factories = append(factories, struct {
+			addr  common.Address
+			label string
+		}{v2Factory2, "DYOR"})
 	}
 
-	tokens := make([]common.Address, 0)
-	for _, p := range pairs {
-		tok, _ := price.NonUSDT0(p.Token0, p.Token1, usdt0)
+	// Phase 1: full scan of canonical factory (fast — few pairs)
+	start := time.Now()
+	canonPairs, err := discover.V2Pairs(ctx, client, v2Factory, usdt0, wgusdt)
+	if err != nil {
+		log.Fatalf("v2 pairs [canonical]: %v", err)
+	}
+	fmt.Printf("  [canonical] %d pairs (%s)\n", len(canonPairs), time.Since(start).Round(time.Millisecond))
+
+	allPairs := make([]discover.PairInfo, 0, len(canonPairs)+100)
+	allPairs = append(allPairs, canonPairs...)
+
+	// Collect unique tokens
+	seenTok := make(map[common.Address]bool)
+	for _, p := range allPairs {
+		tok := arbToken(p.Token0, p.Token1, p.StableToken)
+		seenTok[tok] = true
+	}
+
+	// Phase 2: query DYOR factory via getPair for each known token (fast — O(tokens))
+	if v2Factory2 != (common.Address{}) {
+		tokens := make([]common.Address, 0, len(seenTok))
+		for tok := range seenTok {
+			tokens = append(tokens, tok)
+		}
+		start2 := time.Now()
+		dyorPairs, err := discover.V2PairsForTokens(ctx, client, v2Factory2, usdt0, wgusdt, tokens)
+		if err != nil {
+			log.Fatalf("v2 pairs [DYOR]: %v", err)
+		}
+		fmt.Printf("  [DYOR]     %d pairs (%s)\n", len(dyorPairs), time.Since(start2).Round(time.Millisecond))
+		for _, p := range dyorPairs {
+			tok := arbToken(p.Token0, p.Token1, p.StableToken)
+			seenTok[tok] = true
+		}
+		allPairs = append(allPairs, dyorPairs...)
+	}
+
+	tokens := make([]common.Address, 0, len(seenTok))
+	for tok := range seenTok {
 		tokens = append(tokens, tok)
 	}
 
@@ -156,31 +201,42 @@ func discoverCache(ctx context.Context, client *ethclient.Client, cfg *config.Co
 		poolsByToken[p.Token] = append(poolsByToken[p.Token], p)
 	}
 
+	decCache := make(map[common.Address]int64)
+	poolT0Cache := make(map[common.Address]common.Address)
+
 	cached := make([]cachedPair, 0)
-	for _, pair := range pairs {
-		token, isToken0 := price.NonUSDT0(pair.Token0, pair.Token1, usdt0)
+	for _, pair := range allPairs {
+		token, isToken0 := arbTokenIs0(pair.Token0, pair.Token1, pair.StableToken)
 		tokenPools, ok := poolsByToken[token]
 		if !ok {
 			continue
 		}
 
-		// Get token decimals once
-		dec := discover.TokenDecimals(ctx, client, token)
+		dec, ok := decCache[token]
+		if !ok {
+			dec = discover.TokenDecimals(ctx, client, token)
+			decCache[token] = dec
+		}
 
 		for _, pool := range tokenPools {
-			t0Raw, _ := client.CallContract(ctx, ethereum.CallMsg{To: &pool.Address, Data: selToken0}, nil)
-			poolTok0 := common.BytesToAddress(t0Raw)
+			poolTok0, ok := poolT0Cache[pool.Address]
+			if !ok {
+				t0Raw, _ := client.CallContract(ctx, ethereum.CallMsg{To: &pool.Address, Data: selToken0}, nil)
+				poolTok0 = common.BytesToAddress(t0Raw)
+				poolT0Cache[pool.Address] = poolTok0
+			}
 
 			cached = append(cached, cachedPair{
 				PairAddr:        pair.Address,
 				Token:           token,
+				StableToken:     pair.StableToken,
 				TokenDecimals:   dec,
 				IsToken0:        isToken0,
 				PoolAddr:        pool.Address,
 				PoolTokenIsTok0: poolTok0 == token,
 				Fee:             pool.Fee,
 			})
-	}
+		}
 	}
 	return cached
 	}
@@ -208,6 +264,7 @@ func runDeploy(ctx context.Context, client *ethclient.Client, cfg *config.Config
 		common.HexToAddress(cfg.V2Router),
 		common.HexToAddress(cfg.V3Router),
 		common.HexToAddress(cfg.USDT0),
+		common.HexToAddress(cfg.WgUSDT),
 	)
 	if err != nil {
 		log.Fatalf("deploy: %v", err)
@@ -219,20 +276,77 @@ func runDeploy(ctx context.Context, client *ethclient.Client, cfg *config.Config
 
 func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Config) {
 	usdt0 := common.HexToAddress(cfg.USDT0)
+	wgusdt := common.HexToAddress(cfg.WgUSDT)
 	v2Factory := common.HexToAddress(cfg.V2Factory)
+	v2Factory2 := common.HexToAddress(cfg.V2Factory2)
 	v3Factory := common.HexToAddress(cfg.V3Factory)
 
-	fmt.Println("Scanning V2 pairs...")
-	pairs, err := discover.V2Pairs(ctx, client, v2Factory, usdt0)
-	if err != nil {
-		log.Fatalf("v2 pairs: %v", err)
+	factories := []struct {
+		addr  common.Address
+		label string
+	}{{v2Factory, "canonical"}}
+	if v2Factory2 != (common.Address{}) {
+		factories = append(factories, struct {
+			addr  common.Address
+			label string
+		}{v2Factory2, "DYOR"})
 	}
-	fmt.Printf("Found %d V2 pairs with USDT0:\n", len(pairs))
-	tokens := make([]common.Address, 0)
-	for _, p := range pairs {
-		tok, is0 := price.NonUSDT0(p.Token0, p.Token1, usdt0)
+
+	fmt.Println("Scanning V2 pairs [canonical]...")
+	canonPairs, err := discover.V2Pairs(ctx, client, v2Factory, usdt0, wgusdt)
+	if err != nil {
+		log.Fatalf("v2 pairs [canonical]: %v", err)
+	}
+	fmt.Printf("  Found %d pairs with USDT0 or WgUSDT\n", len(canonPairs))
+	allPairs := make([]discover.PairInfo, 0, len(canonPairs)+100)
+	allPairs = append(allPairs, canonPairs...)
+
+	seenTok := make(map[common.Address]bool)
+	for _, p := range allPairs {
+		tok := arbToken(p.Token0, p.Token1, p.StableToken)
+		seenTok[tok] = true
+	}
+
+	if v2Factory2 != (common.Address{}) {
+		tokens := make([]common.Address, 0, len(seenTok))
+		for tok := range seenTok {
+			tokens = append(tokens, tok)
+		}
+		fmt.Printf("Scanning V2 pairs [DYOR] via getPair (%d tokens)...\n", len(tokens))
+		dyorPairs, err := discover.V2PairsForTokens(ctx, client, v2Factory2, usdt0, wgusdt, tokens)
+		if err != nil {
+			log.Fatalf("v2 pairs [DYOR]: %v", err)
+		}
+		fmt.Printf("  Found %d additional pairs\n", len(dyorPairs))
+		for _, p := range dyorPairs {
+			tok, is0 := arbTokenIs0(p.Token0, p.Token1, p.StableToken)
+			stableLabel := "USDT0"
+			if p.StableToken == wgusdt {
+				stableLabel = "WgUSDT"
+			}
+			fmt.Printf("    %s  token=%s  isToken0=%v  stable=%s\n",
+				p.Address.Hex(), tok.Hex(), is0, stableLabel)
+		}
+		allPairs = append(allPairs, dyorPairs...)
+		for _, p := range dyorPairs {
+			tok := arbToken(p.Token0, p.Token1, p.StableToken)
+			seenTok[tok] = true
+		}
+	}
+
+	for _, p := range canonPairs {
+		tok, is0 := arbTokenIs0(p.Token0, p.Token1, p.StableToken)
+		stableLabel := "USDT0"
+		if p.StableToken == wgusdt {
+			stableLabel = "WgUSDT"
+		}
+		fmt.Printf("    %s  token=%s  isToken0=%v  stable=%s\n",
+			p.Address.Hex(), tok.Hex(), is0, stableLabel)
+	}
+
+	tokens := make([]common.Address, 0, len(seenTok))
+	for tok := range seenTok {
 		tokens = append(tokens, tok)
-		fmt.Printf("  %s  token=%s  (isToken0=%v)\n", p.Address.Hex(), tok.Hex(), is0)
 	}
 
 	fmt.Println("\nScanning V3 pools (liquid only)...")
@@ -293,8 +407,14 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 		v3OutSlipped := price.AddSlippage(v3Out, cfg.SlippageBPS)
 
 		// 5. V2 repayment
-		repay := price.V2AmountIn(borrowAmt, resUSD, resTok)
-		profit := new(big.Int).Sub(v3OutSlipped, repay)
+		repayNative := price.V2AmountIn(borrowAmt, resUSD, resTok)
+		var repayUSD, profit *big.Int
+		if cp.StableToken == common.HexToAddress(cfg.WgUSDT) {
+			repayUSD = price.WgUSDTToUSDT0(repayNative)
+		} else {
+			repayUSD = repayNative
+		}
+		profit = new(big.Int).Sub(v3OutSlipped, repayUSD)
 
 		if st != nil {
 			st.TotalChecks++
@@ -320,7 +440,7 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 				short(cp.Token.Hex()),
 				price.FormatToken(borrowAmt, cp.TokenDecimals),
 				price.FormatUSD(v3Out),
-				price.FormatUSD(repay),
+				price.FormatUSD(repayUSD),
 				price.FormatUSD(profit),
 				price.FormatToken(resTok, cp.TokenDecimals),
 			)
@@ -416,3 +536,19 @@ func short(s string) string {
 	}
 	return s
 	}
+
+// arbToken returns the non-stable token from a V2 pair.
+func arbToken(t0, t1, stable common.Address) common.Address {
+	if t0 == stable {
+		return t1
+	}
+	return t0
+}
+
+// arbTokenIs0 returns the non-stable token and whether it is token0.
+func arbTokenIs0(t0, t1, stable common.Address) (common.Address, bool) {
+	if t0 == stable {
+		return t1, false
+	}
+	return t0, true
+}

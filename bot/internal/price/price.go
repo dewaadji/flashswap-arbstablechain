@@ -22,6 +22,7 @@ var (
 	Q192   = new(big.Int).Lsh(big.NewInt(1), 192)
 	Ten18  = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	Ten6   = new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
+	Ten12  = new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
 )
 
 // V2AmountOut returns output from constant-product AMM for amountIn of reserveIn→reserveOut.
@@ -153,6 +154,16 @@ func EstimateV3Output(amountIn *big.Int, sqrtPriceX96 *big.Int, fee int64, token
 func AddSlippage(amount *big.Int, slippageBPS int64) *big.Int {
 	num := new(big.Int).Mul(amount, big.NewInt(10000-slippageBPS))
 	return num.Div(num, big.NewInt(10000))
+}
+
+// WgUSDTToUSDT0 converts a WgUSDT amount (18 decimals) to USDT0 (6 decimals).
+func WgUSDTToUSDT0(wgusdtAmt *big.Int) *big.Int {
+	return new(big.Int).Div(wgusdtAmt, Ten12)
+}
+
+// USDT0ToWgUSDT converts a USDT0 amount (6 decimals) to WgUSDT (18 decimals).
+func USDT0ToWgUSDT(usdt0Amt *big.Int) *big.Int {
+	return new(big.Int).Mul(usdt0Amt, Ten12)
 }
 
 // NonUSDT0 returns the non-USDT0 token from a pair and whether it's token0.
