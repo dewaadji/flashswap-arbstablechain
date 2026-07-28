@@ -3,6 +3,7 @@ package trader
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/flashswap/bot/internal/contract"
 )
+
+var ErrSimRevert = errors.New("on-chain simulation reverted")
 
 type Trader struct {
 	client      *ethclient.Client
@@ -59,7 +62,32 @@ func (t *Trader) FlashArb(
 		return "", fmt.Errorf("pack: %w", err)
 	}
 
+	// Pre-flight simulation — skip if the trade would revert on-chain.
+	ok, simErr := t.simFlashArb(ctx, input)
+	if simErr != nil {
+		return "", fmt.Errorf("sim: %w", simErr)
+	}
+	if !ok {
+		return "", ErrSimRevert
+	}
+
 	return t.sendTx(ctx, input, big.NewInt(0))
+}
+
+func (t *Trader) simFlashArb(ctx context.Context, data []byte) (bool, error) {
+	msg := ethereum.CallMsg{
+		From: t.from,
+		To:   &t.arbAddr,
+		Data: data,
+	}
+	_, err := t.client.CallContract(ctx, msg, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "execution reverted") || strings.Contains(err.Error(), "revert") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (t *Trader) ExecuteArb(

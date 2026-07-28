@@ -476,7 +476,9 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			if profit.Cmp(cfg.MinProfit) >= 0 && !cfg.DryRun && t != nil {
 				txHash, txErr := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 1, borrowAmt, cfg.MinProfit)
 				if txErr != nil {
-					fmt.Printf("  tx error: %v\n", txErr)
+					if txErr != trader.ErrSimRevert {
+						fmt.Printf("  tx error: %v\n", txErr)
+					}
 				} else {
 					fmt.Printf("  tx: %s\n", txHash)
 				}
@@ -531,7 +533,9 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 					if profit2.Cmp(cfg.MinProfit) >= 0 && !cfg.DryRun && t != nil {
 						txHash, txErr := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 2, borrowStable, cfg.MinProfit)
 						if txErr != nil {
-							fmt.Printf("  tx error (D2): %v\n", txErr)
+							if txErr != trader.ErrSimRevert {
+								fmt.Printf("  tx error (D2): %v\n", txErr)
+							}
 						} else {
 							fmt.Printf("  tx (D2): %s\n", txHash)
 						}
