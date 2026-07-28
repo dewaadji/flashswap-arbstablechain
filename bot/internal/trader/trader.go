@@ -62,8 +62,7 @@ func (t *Trader) FlashArb(
 		return "", fmt.Errorf("pack: %w", err)
 	}
 
-	// Pre-flight simulation — skip if the trade would revert on-chain.
-	ok, simErr := t.simFlashArb(ctx, input)
+	ok, simErr := t.simCall(ctx, input, big.NewInt(0))
 	if simErr != nil {
 		return "", fmt.Errorf("sim: %w", simErr)
 	}
@@ -74,11 +73,12 @@ func (t *Trader) FlashArb(
 	return t.sendTx(ctx, input, big.NewInt(0))
 }
 
-func (t *Trader) simFlashArb(ctx context.Context, data []byte) (bool, error) {
+func (t *Trader) simCall(ctx context.Context, data []byte, value *big.Int) (bool, error) {
 	msg := ethereum.CallMsg{
-		From: t.from,
-		To:   &t.arbAddr,
-		Data: data,
+		From:  t.from,
+		To:    &t.arbAddr,
+		Value: value,
+		Data:  data,
 	}
 	_, err := t.client.CallContract(ctx, msg, nil)
 	if err != nil {
@@ -102,6 +102,14 @@ func (t *Trader) ExecuteArb(
 	input, err := t.arbABI.Pack("executeArb", token, big.NewInt(v3Fee), dir, minProfit, deadline)
 	if err != nil {
 		return "", fmt.Errorf("pack: %w", err)
+	}
+
+	ok, simErr := t.simCall(ctx, input, value)
+	if simErr != nil {
+		return "", fmt.Errorf("sim: %w", simErr)
+	}
+	if !ok {
+		return "", ErrSimRevert
 	}
 
 	return t.sendTx(ctx, input, value)

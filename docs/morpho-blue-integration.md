@@ -2,9 +2,11 @@
 
 ## Konteks
 
-Saat ini bot menggunakan **Uniswap V2 flash swap** sebagai sumber dana arbitrase.
-Flash swap V2 mengenakan fee **0.3%** pada repayment, yang secara signifikan menggerus
-profit untuk trade yang tipis spread-nya.
+Saat ini bot menggunakan **Uniswap V2 flash swap** sebagai sumber dana arbitrase,
+dari dua factory: **Uniswap V2 canonical** (`V2Factory`) dan **DYORswap** (`V2Factory2`).
+Keduanya adalah V2-compatible DEX dengan mekanisme flash swap yang sama (fee **0.3%**
+pada repayment), yang secara signifikan menggerus profit untuk trade yang tipis
+spread-nya.
 
 **Morpho Blue** adalah lending protocol dengan flash loan **0% fee**, sudah deploy di
 Stable Chain. Dengan mengadopsi Morpho sebagai sumber dana alternatif, threshold
@@ -29,6 +31,7 @@ besar karena tidak perlu logic konversi WgUSDT, tidak perlu kalkulasi repayment 
 Sebelum:
   flashArb(pair, token, fee, dir, borrowAmt, minProfit)
     → V2 pair.swap()           [pinjam token atau USDT0, fee 0.3%]
+                                [pair dari Uniswap V2 canonical atau DYORswap]
     → uniswapV2Call()          [callback: beli/jual di V3, repay pair]
 
   executeArb(token, fee, dir, minProfit, deadline)

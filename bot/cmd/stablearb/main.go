@@ -675,7 +675,6 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 	// Sort: prefer higher-fee pools (3000 > 500 > 100 → more liquid).
 	sorted := make([]cachedPair, len(cached))
 	copy(sorted, cached)
-	// Simple bubble — small N.
 	for i := 0; i < len(sorted); i++ {
 		for j := i + 1; j < len(sorted); j++ {
 			if sorted[j].Fee > sorted[i].Fee {
@@ -684,6 +683,14 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		}
 	}
 
+	wgusdtAddr := common.HexToAddress(cfg.WgUSDT)
+	isWgUSDT := func(cp cachedPair) bool { return cp.StableToken == wgusdtAddr }
+
+	// executeArb: own-capital fallback. 1e14 wei → spend ≈ 0.0001 USDT0.
+	execValue := big.NewInt(1_00_000_000_000_000) // 1e14 wei
+	deadline := big.NewInt(time.Now().Unix() + 300)
+	zero := big.NewInt(0)
+
 	for i, cp := range sorted {
 		raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &cp.PairAddr, Data: selGetReserves}, nil)
 		if err != nil {
@@ -691,13 +698,15 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		}
 		r0 := new(big.Int).SetBytes(raw[0:32])
 		r1 := new(big.Int).SetBytes(raw[32:64])
-		var resTok *big.Int
+		var resTok, resStable *big.Int
 		if cp.IsToken0 {
 			resTok = r0
+			resStable = r1
 		} else {
 			resTok = r1
+			resStable = r0
 		}
-		if resTok.Sign() == 0 {
+		if resTok.Sign() == 0 || resStable.Sign() == 0 {
 			continue
 		}
 
@@ -705,9 +714,13 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		if borrowAmt.Sign() == 0 {
 			borrowAmt = big.NewInt(10)
 		}
+		borrowStable := new(big.Int).Div(resStable, big.NewInt(1000000))
+		if borrowStable.Sign() == 0 {
+			borrowStable = big.NewInt(10)
+		}
 
 		stableLabel := "USDT0"
-		if cp.StableToken == common.HexToAddress(cfg.WgUSDT) {
+		if isWgUSDT(cp) {
 			stableLabel = "WgUSDT"
 		}
 
@@ -716,18 +729,56 @@ func runTestFire(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 		fmt.Printf("Token:     %s (decimals=%d)\n", cp.Token.Hex(), cp.TokenDecimals)
 		fmt.Printf("Stable:    %s (%s)\n", cp.StableToken.Hex(), stableLabel)
 		fmt.Printf("V3 Pool:   %s (fee=%d)\n", cp.PoolAddr.Hex(), cp.Fee)
-		fmt.Printf("Borrow:    %s tokens (0.0001%%)\n", price.FormatToken(borrowAmt, cp.TokenDecimals))
-		fmt.Printf("minProfit: 0 (forced)\n")
 
-		txHash, err := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 1, borrowAmt, big.NewInt(0))
-		if err != nil {
-			fmt.Printf("FAILED: %v\n", err)
-			continue
+		// 1. flashArb dir=1: borrow token, repay stable
+		fmt.Printf("  [1/4] flashArb dir=1 borrow=%s...", price.FormatToken(borrowAmt, cp.TokenDecimals))
+		txHash, err := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 1, borrowAmt, zero)
+		if err == nil {
+			fmt.Printf("\nSUCCESS — TX SENT: %s\n", txHash)
+			fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+			return
+		}
+		fmt.Printf(" %v\n", err)
+
+		// 2. flashArb dir=2: borrow stable, repay token (skip WgUSDT — known bug)
+		if !isWgUSDT(cp) {
+			fmt.Printf("  [2/4] flashArb dir=2 borrow=%s...", price.FormatUSD(borrowStable))
+			txHash, err = t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 2, borrowStable, zero)
+			if err == nil {
+				fmt.Printf("\nSUCCESS — TX SENT: %s\n", txHash)
+				fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+				return
+			}
+			fmt.Printf(" %v\n", err)
+		} else {
+			fmt.Printf("  [2/4] flashArb dir=2 skipped (WgUSDT)\n")
 		}
 
-		fmt.Printf("SUCCESS — TX SENT: %s\n", txHash)
-		fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
-		return
+		// 3. executeArb dir=1: own capital → buy V2, sell V3
+		fmt.Printf("  [3/4] executeArb dir=1 value=%s...", price.FormatUSD(execValue))
+		txHash, err = t.ExecuteArb(ctx, cp.Token, cp.Fee, 1, zero, deadline, execValue)
+		if err == nil {
+			fmt.Printf("\nSUCCESS — TX SENT: %s\n", txHash)
+			fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+			return
+		}
+		fmt.Printf(" %v\n", err)
+
+		// 4. executeArb dir=2: own capital → buy V3, sell V2 (skip WgUSDT)
+		if !isWgUSDT(cp) {
+			fmt.Printf("  [4/4] executeArb dir=2 value=%s...", price.FormatUSD(execValue))
+			txHash, err = t.ExecuteArb(ctx, cp.Token, cp.Fee, 2, zero, deadline, execValue)
+			if err == nil {
+				fmt.Printf("\nSUCCESS — TX SENT: %s\n", txHash)
+				fmt.Printf("Check: https://stablescan.xyz/tx/%s\n", txHash)
+				return
+			}
+			fmt.Printf(" %v\n", err)
+		} else {
+			fmt.Printf("  [4/4] executeArb dir=2 skipped (WgUSDT)\n")
+		}
+
+		fmt.Printf("  → all 4 paths failed for this pair\n")
 	}
 
 	log.Fatal("all pairs failed — none could execute")
