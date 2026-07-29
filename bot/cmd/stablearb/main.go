@@ -74,6 +74,7 @@ func main() {
 	onceFlag := flag.Bool("once", false, "Run one arb check cycle")
 	loopFlag := flag.Bool("loop", false, "Run arb loop continuously")
 	testFireFlag := flag.Bool("testfire", false, "Force one tiny trade to verify tx pipeline")
+	verboseFlag := flag.Bool("verbose", false, "Log all pairs (not just near-profitable ones)")
 	durationMin := flag.Int("duration", 0, "Stop after N minutes (0 = run forever)")
 	flag.Parse()
 
@@ -127,12 +128,12 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	if *onceFlag {
-		runOnce(ctx, client, cfg, t, cached, nil)
+		runOnce(ctx, client, cfg, t, cached, nil, *verboseFlag)
 		return
 	}
 
 	if *loopFlag {
-		runLoop(ctx, client, cfg, t, cached, *durationMin)
+		runLoop(ctx, client, cfg, t, cached, *durationMin, *verboseFlag)
 		return
 	}
 
@@ -373,7 +374,7 @@ func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 	}
 }
 
-func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats) {
+func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats, verbose bool) {
 	usdt0Addr := common.HexToAddress(cfg.USDT0)
 
 	// Fetch gas price once per cycle for profitability calculation.
@@ -387,6 +388,12 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			price.Ten12,
 		)
 	}
+
+	// Track the best pair this cycle for the sample log line.
+	var bestCP cachedPair
+	bestProfit := new(big.Int).SetInt64(-1e18) // sentinel: impossibly bad
+	bestDir := 0
+	bestBorrow := big.NewInt(0)
 
 	for _, cp := range cached {
 		// 1. Get V2 reserves
@@ -456,6 +463,14 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			}
 		}
 
+		// Track best pair this cycle (regardless of threshold)
+		if profit.Cmp(bestProfit) > 0 {
+			bestProfit.Set(profit)
+			bestCP = cp
+			bestDir = 1
+			bestBorrow.Set(borrowAmt)
+		}
+
 		// Only log pairs near profitable
 		threshold := new(big.Int).Neg(big.NewInt(100000))
 		if profit.Cmp(threshold) >= 0 {
@@ -463,7 +478,7 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			if profit.Cmp(cfg.MinProfit) >= 0 {
 				marker = "**"
 			}
-			fmt.Printf("%s %-12s borrow=%-10s v3=%-10s repay=%-10s profit=%-10s [resTok=%s]\n",
+			fmt.Printf("%s %-12s borrow=%-10s v3=%-10s repay=%-10s profit=%-10s [resTok=%s] D1\n",
 				marker,
 				short(cp.Token.Hex()),
 				price.FormatToken(borrowAmt, cp.TokenDecimals),
@@ -514,6 +529,14 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 					}
 				}
 
+				// Track best pair this cycle
+				if profit2.Cmp(bestProfit) > 0 {
+					bestProfit.Set(profit2)
+					bestCP = cp
+					bestDir = 2
+					bestBorrow.Set(borrowStable)
+				}
+
 				if profit2.Cmp(threshold) >= 0 {
 					marker2 := "  "
 					if profit2.Cmp(cfg.MinProfit) >= 0 {
@@ -548,9 +571,20 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 	if st == nil {
 		fmt.Printf("  Done checking %d pairs.\n", len(cached))
 	}
+
+	// Always log best (least-worst) pair as a sample
+	if st != nil && bestDir > 0 {
+		dirLabel := fmt.Sprintf("D%d", bestDir)
+		fmt.Printf("  sample: %s %s profit=%s borrow=%s\n",
+			dirLabel,
+			short(bestCP.Token.Hex()),
+			price.FormatUSD(bestProfit),
+			price.FormatUSD(bestBorrow),
+		)
+	}
 }
 
-func runLoop(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, durationMin int) {
+func runLoop(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, durationMin int, verbose bool) {
 	logFile, err := os.Create("arbitrage.log")
 	if err != nil {
 		log.Fatalf("create log: %v", err)
@@ -596,7 +630,7 @@ func runLoop(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 		ts := cycleStart.Format("15:04:05")
 		fmt.Fprintf(multiW, "--- %s [cycle %d] ---\n", ts, st.Cycles+1)
 
-		runOnce(ctx, client, cfg, t, cached, st)
+		runOnce(ctx, client, cfg, t, cached, st, verbose)
 		st.Cycles++
 
 		elapsed := time.Since(cycleStart)
