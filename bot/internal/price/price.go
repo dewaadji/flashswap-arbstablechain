@@ -152,6 +152,88 @@ func AddSlippage(amount *big.Int, slippageBPS int64) *big.Int {
 	return num.Div(num, big.NewInt(10000))
 }
 
+// ---------------------------------------------------------------
+// V3 exact swap math (single-tick) — uses sqrtPriceX96 + liquidity.
+// Accurate for swaps that stay within the current tick (which covers
+// 0.01% borrow ratio trades).
+// ---------------------------------------------------------------
+
+// EstimateV3Swap computes exact V3 swap output within the current tick.
+// sellToken0=true  → selling token0, receiving token1 (USDT0).
+// sellToken0=false → selling token1, receiving token0 (USDT0).
+func EstimateV3Swap(amountIn, sqrtPriceX96, liquidity *big.Int, fee int64, sellToken0 bool) *big.Int {
+	if amountIn.Sign() == 0 || liquidity.Sign() == 0 || sqrtPriceX96.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	amountInAfterFee := new(big.Int).Mul(amountIn, big.NewInt(1000000-fee))
+	amountInAfterFee.Div(amountInAfterFee, big.NewInt(1000000))
+	if amountInAfterFee.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	if sellToken0 {
+		return v3SellToken0(amountInAfterFee, sqrtPriceX96, liquidity)
+	}
+	return v3SellToken1(amountInAfterFee, sqrtPriceX96, liquidity)
+}
+
+// v3SellToken0: sell token0, price goes down (√P decreases).
+// √P_next = L·√P·2⁹⁶ / (amountIn·√P + L·2⁹⁶)
+// amountOut = L · (√P - √P_next) / 2⁹⁶
+func v3SellToken0(amountIn, sqrtPX96, L *big.Int) *big.Int {
+	L_Q96 := new(big.Int).Lsh(L, 96)
+
+	// numerator = L * sqrtPX96 * 2^96
+	numerator := new(big.Int).Mul(L, sqrtPX96)
+	numerator.Lsh(numerator, 96)
+
+	// denominator = amountIn * sqrtPX96 + L * 2^96
+	term1 := new(big.Int).Mul(amountIn, sqrtPX96)
+	denominator := new(big.Int).Add(term1, L_Q96)
+	if denominator.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	sqrtPXNext := new(big.Int).Div(numerator, denominator)
+
+	delta := new(big.Int).Sub(sqrtPX96, sqrtPXNext)
+	if delta.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Div(new(big.Int).Mul(L, delta), Q96)
+}
+
+// v3SellToken1: sell token1, price goes down (√P decreases).
+// √P_next = √P - amountIn·2⁹⁶ / L
+// amountOut = L·2⁹⁶ · (√P - √P_next) / (√P · √P_next)
+func v3SellToken1(amountIn, sqrtPX96, L *big.Int) *big.Int {
+	delta := new(big.Int).Div(new(big.Int).Mul(amountIn, Q96), L)
+	sqrtPXNext := new(big.Int).Sub(sqrtPX96, delta)
+	if sqrtPXNext.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	priceDelta := new(big.Int).Sub(sqrtPX96, sqrtPXNext)
+	if priceDelta.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	num := new(big.Int).Mul(L, Q96)
+	num.Mul(num, priceDelta)
+	denom := new(big.Int).Mul(sqrtPX96, sqrtPXNext)
+	if denom.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Div(num, denom)
+}
+
+// EstimateV3Sell is a convenience wrapper: sell arb token → USDT0.
+func EstimateV3Sell(amountIn, sqrtPriceX96, liquidity *big.Int, fee int64, tokenIsToken0 bool) *big.Int {
+	return EstimateV3Swap(amountIn, sqrtPriceX96, liquidity, fee, tokenIsToken0)
+}
+
+// EstimateV3BuyExact is a convenience wrapper: sell USDT0 → arb token.
+func EstimateV3BuyExact(usdt0In, sqrtPriceX96, liquidity *big.Int, fee int64, tokenIsToken0 bool) *big.Int {
+	// Buy arb token = sell the OTHER side of the pool.
+	return EstimateV3Swap(usdt0In, sqrtPriceX96, liquidity, fee, !tokenIsToken0)
+}
+
 // EstimateV3Buy estimates token output from selling USDT0 on V3.
 // usdt0In is in USDT0 6-decimal units; returns token amount in token native decimals.
 func EstimateV3Buy(usdt0In *big.Int, sqrtPriceX96 *big.Int, fee int64, tokenIsToken0 bool) *big.Int {
