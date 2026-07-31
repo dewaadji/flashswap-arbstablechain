@@ -1,3 +1,4 @@
+docker logs bot-arb-1 2>&1 | grep -E '\[TX SENT\]|^\*\*|tx error|tx: 0x'
 # Flash Swap Bot — Deployment Data
 
 ## Chain

@@ -376,6 +376,7 @@ func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 
 func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats, verbose bool) {
 	usdt0Addr := common.HexToAddress(cfg.USDT0)
+	quoterAddr := common.HexToAddress(cfg.V3Quoter)
 
 	// Fetch gas price once per cycle for profitability calculation.
 	gasPrice, _ := client.SuggestGasPrice(ctx)
@@ -430,14 +431,17 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			continue
 		}
 
-		// 3. Dir 1: borrow 1% of token reserves
-		borrowAmt := new(big.Int).Div(resTok, big.NewInt(100))
+		// 3. Dir 1: borrow 0.01% of token reserves
+		borrowAmt := new(big.Int).Div(resTok, big.NewInt(10000))
 		if borrowAmt.Sign() == 0 {
 			borrowAmt = big.NewInt(1e6)
 		}
 
-		// 4. Estimate V3 output: sell token → USDT0
-		v3Out := price.EstimateV3Output(borrowAmt, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+		// 4. Quote V3 output: sell token → USDT0 (Quoter first, spot fallback)
+		v3Out, err := price.QuoteV3(ctx, client, quoterAddr, cp.Token, usdt0Addr, cp.Fee, borrowAmt)
+		if err != nil {
+			v3Out = price.EstimateV3Output(borrowAmt, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+		}
 		v3OutSlipped := price.AddSlippage(v3Out, cfg.SlippageBPS)
 
 		// 5. V2 repayment
@@ -491,7 +495,9 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 			if profit.Cmp(cfg.MinProfit) >= 0 && !cfg.DryRun && t != nil {
 				txHash, txErr := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 1, borrowAmt, cfg.MinProfit)
 				if txErr != nil {
-					if txErr != trader.ErrSimRevert {
+					if txErr == trader.ErrSimRevert {
+						fmt.Printf("  sim reverted: %s D1\n", short(cp.Token.Hex()))
+					} else {
 						fmt.Printf("  tx error: %v\n", txErr)
 					}
 				} else {
@@ -503,17 +509,23 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 		// Dir 2: borrow stable, buy token on V3, repay token, sell leftover.
 		// Skip WgUSDT pairs — contract has a known bug with Dir 2 on WgUSDT.
 		if cp.StableToken == usdt0Addr {
-			borrowStable := new(big.Int).Div(resUSD, big.NewInt(100))
+			borrowStable := new(big.Int).Div(resUSD, big.NewInt(10000))
 			if borrowStable.Sign() == 0 {
 				borrowStable = big.NewInt(1e6)
 			}
 
-			tokenBought := price.EstimateV3Buy(borrowStable, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+			tokenBought, err := price.QuoteV3(ctx, client, quoterAddr, usdt0Addr, cp.Token, cp.Fee, borrowStable)
+			if err != nil {
+				tokenBought = price.EstimateV3Buy(borrowStable, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+			}
 			repayToken := price.V2AmountIn(borrowStable, resTok, resUSD)
 
 			if tokenBought.Cmp(repayToken) > 0 {
 				leftover := new(big.Int).Sub(tokenBought, repayToken)
-				leftoverUSD := price.EstimateV3Output(leftover, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+				leftoverUSD, err := price.QuoteV3(ctx, client, quoterAddr, cp.Token, usdt0Addr, cp.Fee, leftover)
+				if err != nil {
+					leftoverUSD = price.EstimateV3Output(leftover, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
+				}
 				profit2 := price.AddSlippage(leftoverUSD, cfg.SlippageBPS)
 					profit2.Sub(profit2, gasCostUSD)
 
@@ -556,7 +568,9 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 					if profit2.Cmp(cfg.MinProfit) >= 0 && !cfg.DryRun && t != nil {
 						txHash, txErr := t.FlashArb(ctx, cp.PairAddr, cp.Token, cp.Fee, 2, borrowStable, cfg.MinProfit)
 						if txErr != nil {
-							if txErr != trader.ErrSimRevert {
+							if txErr == trader.ErrSimRevert {
+								fmt.Printf("  sim reverted: %s D2\n", short(cp.Token.Hex()))
+							} else {
 								fmt.Printf("  tx error (D2): %v\n", txErr)
 							}
 						} else {
