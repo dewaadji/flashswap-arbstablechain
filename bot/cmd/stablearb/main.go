@@ -377,6 +377,7 @@ func runDiscover(ctx context.Context, client *ethclient.Client, cfg *config.Conf
 func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, t *trader.Trader, cached []cachedPair, st *Stats, verbose bool) {
 	usdt0Addr := common.HexToAddress(cfg.USDT0)
 	quoterAddr := common.HexToAddress(cfg.V3Quoter)
+	quoterFailed := false
 
 	// Fetch gas price once per cycle for profitability calculation.
 	gasPrice, _ := client.SuggestGasPrice(ctx)
@@ -440,6 +441,10 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 		// 4. Quote V3 output: sell token → USDT0 (Quoter first, spot fallback)
 		v3Out, err := price.QuoteV3(ctx, client, quoterAddr, cp.Token, usdt0Addr, cp.Fee, borrowAmt)
 		if err != nil {
+			if !quoterFailed {
+				fmt.Printf("  [WARN] Quoter unavailable, using spot estimate: %v\n", err)
+				quoterFailed = true
+			}
 			v3Out = price.EstimateV3Output(borrowAmt, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
 		}
 		v3OutSlipped := price.AddSlippage(v3Out, cfg.SlippageBPS)
@@ -516,6 +521,10 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 
 			tokenBought, err := price.QuoteV3(ctx, client, quoterAddr, usdt0Addr, cp.Token, cp.Fee, borrowStable)
 			if err != nil {
+				if !quoterFailed {
+					fmt.Printf("  [WARN] Quoter unavailable, using spot estimate: %v\n", err)
+					quoterFailed = true
+				}
 				tokenBought = price.EstimateV3Buy(borrowStable, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
 			}
 			repayToken := price.V2AmountIn(borrowStable, resTok, resUSD)
@@ -524,6 +533,10 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 				leftover := new(big.Int).Sub(tokenBought, repayToken)
 				leftoverUSD, err := price.QuoteV3(ctx, client, quoterAddr, cp.Token, usdt0Addr, cp.Fee, leftover)
 				if err != nil {
+					if !quoterFailed {
+						fmt.Printf("  [WARN] Quoter unavailable, using spot estimate: %v\n", err)
+						quoterFailed = true
+					}
 					leftoverUSD = price.EstimateV3Output(leftover, poolState.SqrtPriceX96, cp.Fee, cp.PoolTokenIsTok0)
 				}
 				profit2 := price.AddSlippage(leftoverUSD, cfg.SlippageBPS)

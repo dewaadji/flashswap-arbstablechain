@@ -234,15 +234,15 @@ func formatDec(amount *big.Int, decimals int) string {
 	return result
 }
 
-// QuoteV3 calls Quoter V2 — kept for reference but may not work on Stable Chain.
-// Use FetchPoolState + EstimateV3Output instead.
+// QuoteV3 calls Quoter V2 (tuple-style interface) for exact V3 swap output.
 func QuoteV3(ctx context.Context, client *ethclient.Client, quoterAddr, tokenIn, tokenOut common.Address, fee int64, amountIn *big.Int) (*big.Int, error) {
 	quoterABI, err := abi.JSON(strings.NewReader(contract.QuoterABI))
 	if err != nil {
 		return nil, err
 	}
 
-	input, err := quoterABI.Pack("quoteExactInputSingle", tokenIn, tokenOut, big.NewInt(fee), amountIn, common.Big0)
+	// V2 tuple param order: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+	input, err := quoterABI.Pack("quoteExactInputSingle", tokenIn, tokenOut, amountIn, big.NewInt(fee), common.Big0)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +252,11 @@ func QuoteV3(ctx context.Context, client *ethclient.Client, quoterAddr, tokenIn,
 		return nil, err
 	}
 
-	result := new(big.Int).SetBytes(raw)
+	// V2 returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 ticksCrossed, uint256 gasEstimate)
+	// Extract first 32 bytes = amountOut.
+	if len(raw) < 32 {
+		return nil, fmt.Errorf("quoter: short response")
+	}
+	result := new(big.Int).SetBytes(raw[0:32])
 	return result, nil
 }
