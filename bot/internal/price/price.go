@@ -4,14 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-
-	"github.com/flashswap/bot/internal/contract"
 )
 
 // V2 constants (0.3% fee = 997 / 1000)
@@ -234,29 +230,28 @@ func formatDec(amount *big.Int, decimals int) string {
 	return result
 }
 
-// QuoteV3 calls Quoter V2 (tuple-style interface) for exact V3 swap output.
+// QuoteV3 calls Quoter V2 for exact V3 swap output.
+// Manually encodes calldata to avoid go-ethereum ABI tuple packing issues.
+// Selector: keccak256("quoteExactInputSingle((address,address,uint256,uint24,uint160))") = 0xc6a5026a
 func QuoteV3(ctx context.Context, client *ethclient.Client, quoterAddr, tokenIn, tokenOut common.Address, fee int64, amountIn *big.Int) (*big.Int, error) {
-	quoterABI, err := abi.JSON(strings.NewReader(contract.QuoterABI))
+	// Layout: selector(4) + tokenIn(32) + tokenOut(32) + amountIn(32) + fee(32) + sqrtPriceLimitX96(32)
+	data := make([]byte, 4+5*32)
+	copy(data[0:4], []byte{0xc6, 0xa5, 0x02, 0x6a})
+	copy(data[4+12:4+32], tokenIn.Bytes())       // address @ offset 4
+	copy(data[36+12:36+32], tokenOut.Bytes())     // address @ offset 36
+	amountIn.FillBytes(data[68:100])              // uint256 @ offset 68
+	feeBig := new(big.Int).SetInt64(fee)
+	feeBig.FillBytes(data[100:132])               // uint24 left-padded @ offset 100
+	// sqrtPriceLimitX96 @ offset 132 stays zero (no limit)
+
+	raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &quoterAddr, Data: data}, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// V2 tuple param order: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
-	input, err := quoterABI.Pack("quoteExactInputSingle", tokenIn, tokenOut, amountIn, big.NewInt(fee), common.Big0)
-	if err != nil {
-		return nil, err
-	}
-
-	raw, err := client.CallContract(ctx, ethereum.CallMsg{To: &quoterAddr, Data: input}, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// V2 returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 ticksCrossed, uint256 gasEstimate)
-	// Extract first 32 bytes = amountOut.
+	// V2 returns (uint256 amountOut, uint160, uint32, uint256) — first 32 bytes = amountOut.
 	if len(raw) < 32 {
 		return nil, fmt.Errorf("quoter: short response")
 	}
-	result := new(big.Int).SetBytes(raw[0:32])
-	return result, nil
+	return new(big.Int).SetBytes(raw[0:32]), nil
 }

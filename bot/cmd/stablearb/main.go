@@ -422,6 +422,10 @@ func runOnce(ctx context.Context, client *ethclient.Client, cfg *config.Config, 
 		if resTok.Sign() == 0 || resUSD.Sign() == 0 {
 			continue
 		}
+		// Skip dust pairs (< $1 stable reserves) — borrow math unreliable at this scale.
+		if resUSD.Cmp(big.NewInt(1_000_000)) < 0 {
+			continue
+		}
 
 		// 2. Get V3 pool state
 		poolState, ok := price.FetchPoolState(ctx, client, cp.PoolAddr)
